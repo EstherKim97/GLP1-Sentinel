@@ -1,0 +1,24 @@
+# FAERS-GLP1-Watch — full pipeline dependencies
+# Install: pip install -r requirements.txt
+
+# Core data
+pandas>=2.1.0
+pyarrow>=14.0.0
+
+# Download
+requests>=2.31.0
+tqdm>=4.66.0
+
+# Signal detection
+scipy>=1.11.0
+
+# EDA report (Phase 5)
+plotly>=5.18.0
+matplotlib>=3.8.0
+
+# Testing
+pytest>=7.4.0
+
+# Phase 6 — BigQuery (install when ready)
+# google-cloud-bigquery>=3.13.0
+# google-cloud-language>=2.12.0
