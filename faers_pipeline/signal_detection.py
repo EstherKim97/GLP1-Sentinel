@@ -190,40 +190,13 @@ def _ic(a: int, b: int, c: int, d: int
 # ── Contingency table builder ─────────────────────────────────────────────────
 
 def build_contingency_tables(
-    drug_glp1_ps  : pd.DataFrame,
-    reac_with_soc : pd.DataFrame,
-    n_total_cases : int,
-    level         : str = "pt",
-    full_reac     : pd.DataFrame | None = None,
+    drug_glp1_ps    : pd.DataFrame,
+    reac_with_soc   : pd.DataFrame,
+    n_total_cases   : int,
+    level           : str = "pt",
+    full_reac       : pd.DataFrame | None = None,
+    reac_pt_marginal: dict | None = None,
 ) -> pd.DataFrame:
-    """
-    Build 2×2 contingency tables for all (drug, reaction) pairs.
-
-    Args:
-        drug_glp1_ps:   GLP-1 primary-suspect DRUG rows.
-                        Required cols: primaryid, glp1_active_ingredient
-        reac_with_soc:  GLP-1-scoped REAC rows with SOC annotation.
-                        Required cols: primaryid, pt, soc_name
-                        Used to compute cell a (co-occurrence with drug).
-        n_total_cases:  Total unique cases in full DEMO (the denominator N).
-        level:          'pt' (Preferred Term) or 'soc' (System Organ Class).
-        full_reac:      Optional: full REAC file (all drugs, all cases).
-                        Used to compute reaction marginals (a + c) across
-                        the whole database.
-
-    DECISION: cell c requires the full REAC denominator.
-    c = unique cases that have this reaction WITHOUT the target drug.
-    If we compute reaction_total only from GLP-1-scoped REAC, then
-    reaction_total = a + (GLP-1 cases with reaction but different drug).
-    This is wrong — it misses all non-GLP-1 cases that have the reaction.
-    The correct c = (all cases with this PT in full database) - a.
-    This makes disproportionality meaningful: the signal compares GLP-1
-    reporting rate against the whole FAERS background, not just other GLP-1s.
-
-    When full_reac is not provided (e.g. in unit tests with small data),
-    we fall back to using reac_with_soc for reaction totals, with a
-    warning. This fallback is appropriate for testing but not for real analysis.
-    """
     reaction_col = "pt" if level == "pt" else "soc_name"
     drug_col     = "glp1_active_ingredient"
 
@@ -231,7 +204,6 @@ def build_contingency_tables(
         logger.error(f"  Column '{reaction_col}' not in REAC DataFrame")
         return pd.DataFrame()
 
-    # Normalize primaryid to numeric for consistent merging
     def _norm_pid(df, col="primaryid"):
         d = df.copy()
         d["_pid"] = pd.to_numeric(d[col], errors="coerce")
@@ -240,86 +212,69 @@ def build_contingency_tables(
     drug_clean = _norm_pid(drug_glp1_ps)
     reac_clean = _norm_pid(reac_with_soc)
 
-    # ── Cell a: cases with BOTH drug D and reaction E ─────────────────────────
+    # Cell a
     merged = drug_clean[["_pid", drug_col]].merge(
-        reac_clean[["_pid", reaction_col]],
-        on="_pid",
-        how="inner",
-    )
+        reac_clean[["_pid", reaction_col]], on="_pid", how="inner")
     cell_a = (
-        merged
-        .groupby([drug_col, reaction_col])["_pid"]
-        .nunique()
+        merged.groupby([drug_col, reaction_col])["_pid"].nunique()
         .reset_index()
         .rename(columns={"_pid": "a", drug_col: "drug", reaction_col: "reaction_term"})
     )
 
-    # ── Drug marginal (a + b): cases with drug D ─────────────────────────────
+    # Drug marginal (a + b)
     drug_totals = (
-        drug_clean.groupby(drug_col)["_pid"]
-        .nunique()
-        .rename("drug_total")
-        .reset_index()
+        drug_clean.groupby(drug_col)["_pid"].nunique()
+        .rename("drug_total").reset_index()
         .rename(columns={drug_col: "drug"})
     )
 
-    # ── Reaction marginal (a + c): cases with reaction E in full database ─────
-    # DECISION: use full_reac when available so c reflects all non-drug cases
-    # with this reaction, not just GLP-1 cases.
-    if full_reac is not None and not full_reac.empty:
-        reac_for_marginal = _norm_pid(full_reac)
-        # Map soc_name from reac_with_soc if SOC level and full_reac lacks it
-        if level == "soc" and "soc_name" not in full_reac.columns and "pt" in full_reac.columns:
+    # Reaction marginal (a + c)
+    if reac_pt_marginal is not None:
+        # Pre-aggregated dict — most memory efficient, ~500 rows
+        if level == "soc":
             pt_to_soc = (
-                reac_with_soc[["pt", "soc_name"]]
-                .dropna()
-                .drop_duplicates("pt")
-                .set_index("pt")["soc_name"]
-                .to_dict()
+                reac_with_soc[["pt", "soc_name"]].dropna()
+                .drop_duplicates("pt").set_index("pt")["soc_name"].to_dict()
+            )
+            soc_counts: dict = {}
+            for pt, n in reac_pt_marginal.items():
+                soc = pt_to_soc.get(pt)
+                if soc:
+                    soc_counts[soc] = soc_counts.get(soc, 0) + n
+            reaction_totals = pd.DataFrame(
+                list(soc_counts.items()), columns=["reaction_term", "reaction_total"])
+        else:
+            reaction_totals = pd.DataFrame(
+                list(reac_pt_marginal.items()),
+                columns=["reaction_term", "reaction_total"])
+    elif full_reac is not None and not full_reac.empty:
+        reac_for_marginal = _norm_pid(full_reac)
+        if level == "soc" and "soc_name" not in full_reac.columns:
+            pt_to_soc = (
+                reac_with_soc[["pt", "soc_name"]].dropna()
+                .drop_duplicates("pt").set_index("pt")["soc_name"].to_dict()
             )
             reac_for_marginal["soc_name"] = reac_for_marginal["pt"].map(pt_to_soc)
         marginal_col = reaction_col if reaction_col in reac_for_marginal.columns else "pt"
-    else:
-        if full_reac is not None:
-            logger.warning(
-                "  full_reac provided but empty — using GLP-1-scoped REAC for "
-                "reaction marginals. Cell c will undercount non-GLP-1 background."
-            )
-        reac_for_marginal = reac_clean
-        marginal_col      = reaction_col
-
-    if marginal_col in reac_for_marginal.columns:
         reaction_totals = (
-            reac_for_marginal.groupby(marginal_col)["_pid"]
-            .nunique()
-            .rename("reaction_total")
-            .reset_index()
-            .rename(columns={marginal_col: "reaction_term"})
+            reac_for_marginal.groupby(marginal_col)["_pid"].nunique().reset_index()
+            .rename(columns={"_pid": "reaction_total", marginal_col: "reaction_term"})
         )
     else:
-        logger.warning(f"  Reaction column '{marginal_col}' not in REAC for marginals")
-        reaction_totals = pd.DataFrame(columns=["reaction_term", "reaction_total"])
+        logger.warning("  No full_reac — using GLP-1-scoped REAC for marginals (c undercount)")
+        reaction_totals = (
+            reac_clean.groupby(reaction_col)["_pid"].nunique().reset_index()
+            .rename(columns={"_pid": "reaction_total", reaction_col: "reaction_term"})
+        )
 
-    # ── Assemble ──────────────────────────────────────────────────────────────
+    # Assemble
     ct = (
         cell_a
         .merge(drug_totals,     on="drug",         how="left")
         .merge(reaction_totals, on="reaction_term", how="left")
     )
-    ct["reaction_total"] = ct["reaction_total"].fillna(ct["a"])  # fallback: a only
+    ct["reaction_total"] = ct["reaction_total"].fillna(ct["a"])
     ct["N"] = n_total_cases
-    ct["b"] = (ct["drug_total"]     - ct["a"]).clip(lower=0).astype(int)
-    ct["c"] = (ct["reaction_total"] - ct["a"]).clip(lower=0).astype(int)
-    ct["d"] = (ct["N"] - ct["a"] - ct["b"] - ct["c"]).clip(lower=0).astype(int)
-
-    ct = ct.drop(columns=["drug_total", "reaction_total"])
-
-    logger.info(
-        f"  Contingency tables ({level}): "
-        f"{len(ct):,} (drug, reaction) pairs before minimum case filter"
-    )
-    return ct
-
 
 # ── Apply signal metrics to contingency table ─────────────────────────────────
 
@@ -529,13 +484,14 @@ def tto_summary(tto_df: pd.DataFrame) -> pd.DataFrame:
 # ── Full Phase 4 runner ───────────────────────────────────────────────────────
 
 def run_signal_detection(
-    drug_glp1_ps : pd.DataFrame,
-    reac_with_soc: pd.DataFrame,
-    demo_all     : pd.DataFrame,
-    ther_df      : pd.DataFrame | None = None,
-    demo_glp1    : pd.DataFrame | None = None,
-    full_reac    : pd.DataFrame | None = None,
-    min_cases    : int = MIN_CASES,
+    drug_glp1_ps     : pd.DataFrame,
+    reac_with_soc    : pd.DataFrame,
+    demo_all         : pd.DataFrame,
+    ther_df          : pd.DataFrame | None = None,
+    demo_glp1        : pd.DataFrame | None = None,
+    full_reac        : pd.DataFrame | None = None,
+    reac_pt_marginal : dict | None = None,
+    min_cases        : int = MIN_CASES,
 ) -> dict[str, pd.DataFrame]:
     """
     Run full Phase 4 signal detection pipeline.
@@ -572,7 +528,8 @@ def run_signal_detection(
     # ── PT-level signals ──────────────────────────────────────────────────────
     logger.info("\n  Computing PT-level contingency tables...")
     ct_pt = build_contingency_tables(
-        drug_glp1_ps, reac_with_soc, n_total, level="pt", full_reac=full_reac
+        drug_glp1_ps, reac_with_soc, n_total, level="pt",
+        full_reac=full_reac, reac_pt_marginal=reac_pt_marginal
     )
     if not ct_pt.empty:
         signals_pt = compute_signals(ct_pt, min_cases)
@@ -581,7 +538,8 @@ def run_signal_detection(
     # ── SOC-level signals ─────────────────────────────────────────────────────
     logger.info("\n  Computing SOC-level contingency tables...")
     ct_soc = build_contingency_tables(
-        drug_glp1_ps, reac_with_soc, n_total, level="soc", full_reac=full_reac
+        drug_glp1_ps, reac_with_soc, n_total, level="soc",
+        full_reac=full_reac, reac_pt_marginal=reac_pt_marginal
     )
     if not ct_soc.empty:
         signals_soc = compute_signals(ct_soc, min_cases)

@@ -165,6 +165,7 @@ def parse_file_type(
                 dtype=str,          # All string initially
                 low_memory=False,
                 on_bad_lines="warn",
+                index_col=False,
             )
 
             # Normalize column names: strip whitespace, lowercase

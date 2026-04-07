@@ -1,256 +1,209 @@
 # FAERS-GLP1-Watch
+### End-to-end pharmacovigilance pipeline for the GLP-1 drug class
 
-**An end-to-end pharmacovigilance pipeline for the GLP-1 drug class**
-
-[![Tests](https://github.com/YOUR_USERNAME/faers-glp1-watch/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USERNAME/faers-glp1-watch/actions)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Tests](https://img.shields.io/badge/tests-241%20passing-brightgreen)](tests/)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
+[![Data](https://img.shields.io/badge/FAERS-2005Q2--2024Q3-orange)](https://fis.fda.gov/)
 
 ---
 
-## What this is
+## Why this exists
 
-GLP-1 receptor agonists — semaglutide, tirzepatide, liraglutide, and class — are the fastest-adopted drug class in US history. In 2024–2025, FDA's own quarterly FAERS signal reports flagged new neurological, pulmonary aspiration, and gastrointestinal serious risk signals for this class. Simultaneously, staff reductions reduced the agency's capacity to monitor them systematically.
+In 2024, GLP-1 receptor agonists became the fastest-adopted prescription 
+drug class in US history. Ozempic, Wegovy, and Mounjaro prescriptions grew 
+300% year-over-year. At the same time, FDA staff reductions cut the 
+pharmacovigilance workforce responsible for monitoring adverse event signals 
+from this exact class.
 
-This pipeline ingests the raw FDA Adverse Event Reporting System (FAERS/AEMS) quarterly files, resolves their well-documented quality problems, applies GLP-1 drug name normalization, joins the MedDRA reaction hierarchy, detects disproportionality signals, and produces a self-contained HTML EDA report — with every data decision documented inline.
+FDA's own quarterly signal reports were already flagging new serious risks —
+pulmonary aspiration under anesthesia, neurological adverse events, 
+gastrointestinal complications requiring hospitalization. Compounded 
+semaglutide (unapproved salt forms sold online) was generating a separate 
+wave of reports the standard pipeline wasn't designed to distinguish.
 
-**The decision log is not an afterthought. In drug safety, it is the deliverable.**
+I built this pipeline to do what that reduced workforce no longer could at 
+scale: ingest 20 years of raw FDA adverse event data, resolve its known 
+quality problems, and surface the signals that matter.
+
+---
+
+## What it found
+
+Running across 20,904,555 total FAERS cases from 2005 Q2 through 2024 Q3,
+the pipeline identified 288,173 GLP-1 primary-suspect cases and detected
+**2,665 statistically significant drug-reaction signals** out of 10,131 
+tested pairs.
+
+The top findings are clinically meaningful:
+
+| Drug | Reaction | Cases | ROR | CI | Methods |
+|------|----------|-------|-----|----|---------|
+| Liraglutide | Thyroid C-cell hyperplasia | 4 | 811 | 182–3,624 | 3/3 |
+| Exenatide | Early satiety | 698 | 868 | 742–1,016 | 3/3 |
+| Semaglutide | Idiopathic pancreatitis | 4 | 247 | 76–802 | 3/3 |
+| Semaglutide | Allodynia | 168 | 149 | 125–176 | 3/3 |
+| Tirzepatide | Injection site coldness | 136 | 124 | 102–151 | 3/3 |
+| Dulaglutide | Diabetic amyotrophy | 6 | 114 | 45–291 | 3/3 |
+
+Thyroid C-cell hyperplasia in liraglutide matches the FDA black box warning.
+Pancreatitis in semaglutide matches the 2024 FDA signal report. Allodynia 
+(nerve pain) in semaglutide is consistent with the 2025 Scientific Reports 
+neurological AE study. These aren't accidents — they're what a correctly 
+built pipeline should find.
+
+The SOC heatmap shows gastrointestinal disorders are the dominant signal 
+class (79,690 unique cases), followed by investigations (45,827) and 
+metabolism and nutrition disorders (39,226). Semaglutide and liraglutide 
+show the broadest SOC signal coverage, consistent with their longer market 
+history and higher reporting volume.
+
+---
+
+## The data problem nobody talks about
+
+### 1. The AERS era uses completely different column names
+
+Pre-2012 FDA AERS files call the case identifier `isr` instead of 
+`primaryid` and `case` instead of `caseid`. Every data row also ends with 
+a trailing `$` delimiter. This causes pandas to silently treat the first 
+data column as the DataFrame index, shifting every value one position to 
+the right. `caseid` gets the `i_f_cod` value (`'I'`), which fails numeric 
+casting to `NaN`. `fda_dt` gets `rept_cod` (`'DIR'`/`'EXP'`).
+
+The result: **100% of AERS records were being dropped as duplicates with 
+zero error messages.** The deduplication audit showed `80,524 raw → 0 
+unique cases` for every quarter from 2005 through 2012.
+
+Finding this required reading raw bytes from the ZIP files:
+Header: ISRCASECASE
+CASEI_F_COD......
+...CONFID   (22 fields)
+Row 1:  454824158536335853633
+5853633I$$...NN
+NN$    (23 fields — trailing $)
+
+The fix was one parameter: `index_col=False` in `pd.read_csv()`.
+
+### 2. 2012 Q3 was never published
+
+This quarter falls at the AERS→FAERS transition (September 10, 2012) and 
+was never released by FDA. Without explicit handling, the pipeline retried 
+it five times on every run and logged a failure. It's now in 
+`KNOWN_MISSING_QUARTERS` and skipped silently.
+
+### 3. Deduplication is not obvious
+
+FAERS contains follow-up reports — the same adverse event submitted 
+multiple times as the case evolves. FDA's recommended two-step rule 
+(Potter et al. 2025, *Clin Pharmacol Ther*): keep the latest `FDA_DT` 
+per `CASEID`, break ties on highest `PRIMARYID`. Using `CASEVERSION` 
+instead — which looks like the right field — produces wrong results 
+because it's unreliable across reporting sources.
+
+Final dedup rates: 12–17% removal for AERS era quarters (cumulative 
+files with genuine follow-up reports), 0% for FAERS era quarters (each 
+quarter contains only new reports).
+
+### 4. The signal denominator matters enormously
+
+The `c` cell in the 2×2 contingency table — cases *without* the drug 
+that still had the reaction — must come from the full 67-million-row REAC 
+database, not just GLP-1 cases. Using GLP-1-only REAC sets the background 
+rate to near-zero and makes every reaction look like a signal.
+
+The fix: pre-aggregate the full REAC file to a `{PT: unique_case_count}` 
+dictionary (38,457 unique preferred terms) before signal detection, 
+reducing the memory footprint from 67M rows to a small dict.
+
+### 5. Memory on 7.8 GB RAM
+
+The full dataset is 2.9 GB of ZIPs producing 5 GB of Parquet. The naive 
+approach — accumulate all 77 quarters in RAM then write — terminates 
+around 2010 Q4. The solution was a full streaming rewrite:
+
+- Parse → write per-quarter Parquet immediately → delete from RAM
+- Merge using `ParquetWriter` one quarter at a time
+- Normalize DRUG in 2M-row chunks via `iter_batches()`
+- Stream REAC and keep only GLP-1-scoped rows in memory
+- Pre-aggregate REAC marginal to avoid loading 67M rows for signal math
+
+Peak RAM usage: ~2 GB at any point during the full pipeline run.
 
 ---
 
 ## Pipeline overview
-
-```
-Phase 1  Download → Parse → Schema-normalize → Deduplicate → Parquet
-Phase 2  Drug name normalization → GLP-1 scoping → PS filter
+Phase 1  Download (77 quarters, 2.9 GB) → Parse → Deduplicate → Parquet
+Phase 2  Drug normalization → GLP-1 scoping → Primary suspect filter
 Phase 3  MedDRA SOC join → Missingness audit
-Phase 4  Signal detection: ROR / PRR / IC (≥2/3 methods)
-Phase 5  Self-contained HTML EDA report (Plotly interactive charts)
-Phase 6  BigQuery NLP layer — Google Health add-on (planned)
-```
+Phase 4  ROR / PRR / IC signal detection (≥2/3 methods, a ≥ 3)
+Phase 5  Self-contained interactive HTML report (Plotly)
 
-Run the entire pipeline with one command:
-
-```bash
-python -m faers_pipeline.pipeline
-```
-
----
-
-## Why the regulatory background matters
-
-Anyone can download FAERS. The hard parts are:
-
-- Knowing FDA's recommended 2-step deduplication rule — and why using `CASEVERSION` is wrong
-- Knowing that AERS (pre-2012) uses `isr` / `case` / `gndr_cod` — different column names than FAERS — and that 2012 Q3 was never published
-- Understanding that `role_cod = 'PS'` (primary suspect) is the correct filter for signal detection, not all drug records
-- Recognising that compounded semaglutide/tirzepatide is a clinically distinct population that must be flagged separately
-- Knowing which MedDRA level is appropriate for which analysis (PT vs. SOC)
-
-These are regulatory decisions embedded in the code, not engineering guesses. Each one has a citation.
-
----
-
-## Quickstart
-
-```bash
-# 1. Clone and install
-git clone https://github.com/YOUR_USERNAME/faers-glp1-watch.git
-cd faers-glp1-watch
-pip install -r requirements.txt
-
-# 2. Verify tests pass (no FDA data required)
-python -m pytest tests/ -v
-
-# 3. See what would be downloaded — sanity check before committing disk space
-python -m faers_pipeline.pipeline --dry-run
-
-# 4. Run full pipeline (~3-5 GB download, ~30-60 min depending on connection)
-python -m faers_pipeline.pipeline
-
-# 5. After pipeline completes, open the EDA report
-open docs/eda_report_v20240930.html   # macOS
-# or: xdg-open docs/eda_report_v20240930.html
-```
-
-### Useful flags
-
-```bash
-# Skip download if ZIPs already in data/raw/ (re-run analysis only)
-python -m faers_pipeline.pipeline --skip-download
-
-# Run specific quarters only (useful for development)
-python -m faers_pipeline.pipeline --quarters 2023Q1 2023Q2 2024Q3
-
-# Use MedDRA subscription file for full PT→SOC coverage
-python -m faers_pipeline.pipeline --mdhier /path/to/mdhier.asc
-
-# Skip EDA report (faster, useful for CI)
-python -m faers_pipeline.pipeline --skip-download --no-report
-
-# Generate EDA report standalone (after pipeline has run)
-python -m faers_pipeline.eda_report
-
-# Generate data quality audit chart standalone
-python -m faers_pipeline.audit_chart
-```
-
----
-
-## Output files
-
-After running, `data/processed/` contains:
-
-```
-data/
-├── raw/
-│   ├── faers_ascii_2024q3.zip          Original ZIPs (untouched)
-│   ├── aers_ascii_2005q2.zip
-│   └── download_manifest.json          Every download: status, size, URL
-├── processed/
-│   ├── DEMO_deduplicated_v20240930.parquet      All cases, all drugs
-│   ├── DRUG_deduplicated_v20240930.parquet      All drugs, all roles
-│   ├── DRUG_annotated_v20240930.parquet         All drugs + GLP-1 flags
-│   ├── DRUG_glp1_ps_v20240930.parquet           GLP-1 primary suspect only
-│   ├── DEMO_glp1_v20240930.parquet              Cases with ≥1 GLP-1 PS drug
-│   ├── REAC_glp1_soc_v20240930.parquet          GLP-1 reactions + SOC codes
-│   ├── SOC_summary_v20240930.csv                Cases per SOC (chart-ready)
-│   ├── signals_pt_v20240930.parquet             PT-level signals (ROR/PRR/IC)
-│   ├── signals_soc_v20240930.parquet            SOC-level signals
-│   ├── tto_v20240930.parquet                    Time-to-onset records
-│   └── tto_summary_v20240930.parquet            Per-drug TTO statistics
-└── logs/
-    ├── dedup_audit_v20240930.csv           Phase 1: dedup counts per quarter
-    ├── normalization_audit_v20240930.json  Phase 2: match rates by tier
-    ├── meddra_audit_v20240930.json         Phase 3: SOC mapping rate + unmapped
-    └── signal_audit_v20240930.json         Phase 4: signal counts, thresholds
-
+data/processed/
+DEMO_deduplicated_v20240930.parquet     20,907,551 rows  680 MB
+DRUG_deduplicated_v20240930.parquet     82,161,150 rows  1,216 MB
+DRUG_glp1_ps_v20240930.parquet            288,175 rows
+DEMO_glp1_v20240930.parquet               288,173 rows
+REAC_glp1_soc_v20240930.parquet           788,355 rows
+SOC_summary_v20240930.csv                  18 SOCs
+signals_pt_v20240930.parquet            2,665 signals / 10,131 pairs
+signals_soc_v20240930.parquet           SOC-level signals
 docs/
-├── data_dictionary.csv             Every column: dtype, null rate, samples
-└── eda_report_v20240930.html       Self-contained interactive report
-```
-
-Version tags (`v20240930`) are tied to the last quarter's end date, not the run date.
+eda_report.html                         Interactive report (Plotly)
 
 ---
 
-## Data decision log
+## Signal detection methodology
 
-### Phase 1 — Deduplication
-
-FDA-recommended 2-step rule (Potter et al. 2025, *Clin Pharmacol Ther*):
-1. Per `CASEID`, keep the record with the most recent `FDA_DT`
-2. On ties, keep the highest `PRIMARYID`
-
-We do **not** use `CASEVERSION` — it is unreliable across reporting sources.
-
-**AERS era (pre-2012):** Legacy AERS files (2004 Q1 → 2012 Q2) use different column names: `isr` instead of `primaryid`, `case` instead of `caseid`, `gndr_cod` instead of `sex`. The pipeline renames these at parse time so all downstream code is era-agnostic. See `schema.py`.
-
-**2012 Q3 — missing quarter:** FDA never published this quarter. It falls at the AERS→FAERS transition (Sept 10, 2012). The pipeline skips it with status `known_missing`.
-
-### Phase 2 — Drug normalization
-
-Three-tier lookup for each DRUG row:
-- **Tier 1:** `prod_ai` (structured active ingredient field) — most reliable
-- **Tier 2:** `drugname` exact match after cleaning (strip dose, trailing qualifiers)
-- **Tier 3:** prefix matching for name variants not in the reference
-
-We use **primary suspect (`role_cod = PS`) only** for signal analysis. Concomitant drugs are retained in the full annotated file for sensitivity analysis.
-
-Compounded products (semaglutide acetate, compounded tirzepatide, etc.) are flagged with `is_compounded = True` and included by default. FDA documented underreporting of these products and distinct safety profiles (2024–2025 warnings).
-
-### Phase 3 — MedDRA hierarchy
-
-PT→SOC join using three sources in order:
-1. `mdhier.asc` from your MedDRA subscription (pass with `--mdhier`)
-2. Bundled GLP-1-relevant PT→SOC mapping (~110 PTs from published studies)
-3. Unmapped PTs → `meddra_src = 'unmapped'`, logged to audit
-
-**Primary SOC only.** A PT can belong to multiple SOCs; we use the primary classification — consistent with all published FAERS studies and FDA's own signal reports.
-
-### Phase 4 — Signal detection
-
-Three complementary algorithms; a signal requires **≥2 of 3 methods**:
+Three algorithms, signal requires ≥2/3 to agree:
 
 | Method | Threshold | Reference |
 |--------|-----------|-----------|
-| ROR 95% CI lower bound | > 1.0 | Rothman et al., *Pharmacoepidemiol* |
-| PRR with chi-square | PRR ≥ 2.0, χ² ≥ 4.0, a ≥ 3 | Evans et al. 2001 |
-| IC025 (BCPNN lower bound) | > 0.0 | Norén et al. 2006, *Drug Saf* |
+| ROR 95% CI lower bound | > 1.0 | Rothman et al. |
+| PRR + chi-square | PRR ≥ 2.0, χ² ≥ 4.0, a ≥ 3 | Evans et al. 2001 |
+| IC025 (BCPNN) | > 0.0 | Norén et al. 2006 |
 
-Minimum case count: **a ≥ 3** (below this, estimates are unreliable regardless of value).
-
-**Denominator:** N = total unique cases in the full deduplicated DEMO file — not just GLP-1 cases. Disproportionality requires the full FAERS reporting universe.
-
-**No Bonferroni correction by default.** With ~3,500 drug-PT pairs, Bonferroni is extremely conservative. Published GLP-1 FAERS studies use uncorrected thresholds. The `n_signals` column allows downstream Bonferroni application.
-
----
-
-## Project structure
-
-```
-faers_glp1_watch/
-├── faers_pipeline/
-│   ├── quarters.py         Quarter registry, GLP-1 milestone annotations
-│   ├── schema.py           AERS→FAERS column renames, known missing quarters
-│   ├── downloader.py       Retry download with manifest + known-missing skip
-│   ├── parser.py           ZIP extraction, encoding/delimiter handling
-│   ├── deduplicator.py     FDA-recommended 2-step dedup + audit logging
-│   ├── drug_reference.py   GLP-1 brand/generic/compounded lookup table
-│   ├── normalizer.py       3-tier drug name normalization + PS filter
-│   ├── meddra.py           MedDRA SOC hierarchy loader and PT join
-│   ├── signal_detection.py ROR / PRR / IC signal detection + TTO analysis
-│   ├── eda_report.py       Self-contained HTML EDA report (Plotly)
-│   ├── audit_chart.py      Standalone dedup quality chart (matplotlib)
-│   ├── writer.py           Versioned Parquet + audit log output
-│   └── pipeline.py         Orchestrator + CLI (Phases 1–5)
-├── tests/
-│   ├── conftest.py                     Shared fixtures
-│   ├── test_quarters.py                Quarter class and registry (10 tests)
-│   ├── test_schema.py                  AERS/FAERS schema normalization (25 tests)
-│   ├── test_deduplicator.py            Dedup logic (16 tests)
-│   ├── test_pipeline_integration.py    End-to-end with synthetic ZIP (11 tests)
-│   ├── test_drug_reference.py          Drug lookup map (26 tests)
-│   ├── test_normalizer.py              3-tier normalization (48 tests)
-│   ├── test_meddra.py                  MedDRA SOC join (27 tests)
-│   ├── test_signal_detection.py        ROR/PRR/IC math + pipeline (42 tests)
-│   └── test_eda_report.py              EDA report generation (25 tests)
-├── data/                   Git-ignored; created on first run
-├── docs/                   EDA report and data dictionary written here
-├── requirements.txt
-└── README.md
-```
-
-**241 tests, all passing.** Tests run without any FDA data — a synthetic ZIP is built in memory for integration tests.
+Denominator: N = 20,904,555 unique cases in full FAERS database.
+No Bonferroni correction applied (standard in published GLP-1 FAERS 
+studies). The `n_signals` column allows downstream correction.
 
 ---
 
 ## GLP-1 drug scope
 
-| Drug | Mechanism | Approval | Key brands |
-|------|-----------|----------|-----------|
-| Exenatide | GLP-1 RA | 2005 Q2 | Byetta, Bydureon |
-| Liraglutide | GLP-1 RA | 2010 Q1 | Victoza, Saxenda |
-| Dulaglutide | GLP-1 RA | 2014 Q3 | Trulicity |
-| Lixisenatide | GLP-1 RA | 2016 Q3 | Adlyxin |
-| Semaglutide | GLP-1 RA | 2017 Q4 | Ozempic, Wegovy, Rybelsus |
-| Albiglutide | GLP-1 RA | 2014 Q2 | Tanzeum (withdrawn 2017) |
-| Tirzepatide | Dual GIP/GLP-1 | 2022 Q2 | Mounjaro, Zepbound |
+| Drug | Approval | Cases found |
+|------|----------|-------------|
+| Exenatide | 2005 Q2 | 83,997 |
+| Dulaglutide | 2014 Q3 | 68,605 |
+| Tirzepatide | 2022 Q2 | 54,127 |
+| Semaglutide | 2017 Q4 | 37,537 |
+| Liraglutide | 2010 Q1 | 34,314 |
+| Albiglutide | 2014 Q2 | 9,446 |
+| Lixisenatide | 2016 Q3 | 108 |
 
-Scope: **2005 Q2 → 2024 Q3** (78 quarters, 77 downloadable — 2012 Q3 never published)
+---
+
+## Missingness
+
+From the GLP-1 DEMO records: age_grp 83.7% missing, weight 79.7% missing,
+event_dt 50.4% missing, age 43.9% missing. Consistent with published 
+FAERS literature. Does not affect signal detection which operates on 
+reaction counts not demographics.
+
+---
+
+## Tests
+
+241 tests across all modules. Run without any FDA data:
+```bash
+python -m pytest tests/ -v
+```
 
 ---
 
 ## References
 
-- Potter E, Reyes M, Naples J, Dal Pan G. (2025). FDA Adverse Event Reporting System (FAERS) Essentials. *Clin Pharmacol Ther* 118(3):567–582.
-- Scientific Reports (2025). Pharmacovigilance analysis of neurological adverse events associated with GLP-1 receptor agonists based on the FDA FAERS database.
-- Evans SJW et al. (2001). Use of proportional reporting ratios for signal generation. *Pharmacoepidemiol Drug Saf* 10(6):483–486.
-- Norén GN et al. (2006). A statistical methodology for drug-drug interaction surveillance. *Stat Med* 25(9):1621–1632.
-- FDA. (2025). FDA's Concerns with Unapproved GLP-1 Drugs Used for Weight Loss.
-- FDA. (2024). Best Practices for FDA Staff in the Postmarketing Safety Surveillance of Human Drug and Biological Products.
-
----
-
-## License
-
-MIT. Data sourced from FDA public databases, in the public domain.
+- Potter E et al. (2025). FDA FAERS Essentials. *Clin Pharmacol Ther*
+- Evans SJW et al. (2001). PRR for signal generation.  *Pharmacoepidemiol Drug Saf*
+- Norén GN et al. (2006). Drug-drug interaction surveillance. *Stat Med*
+- Scientific Reports (2025). Neurological AEs associated with GLP-1 RAs
+- FDA (2024). Best Practices for Postmarketing Safety Surveillance

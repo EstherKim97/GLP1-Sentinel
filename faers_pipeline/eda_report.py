@@ -161,6 +161,10 @@ def _chart_case_volume(drug_glp1_ps: pd.DataFrame) -> str:
             .reset_index()
             .rename(columns={"primaryid": "cases"})
         )
+        # Sort chronologically — convert YYYYQN to sortable string YYYY-QN
+        vol["_q_sort"] = vol["_quarter"].str.replace("Q", "-Q")
+        vol = vol.sort_values("_q_sort")
+
         fig = go.Figure()
         COLORS = ["#185fa5","#1D9E75","#EF9F27","#D85A30","#7F77DD","#D4537E","#639922"]
         for i, drug in enumerate(sorted(vol["glp1_active_ingredient"].unique())):
@@ -171,7 +175,10 @@ def _chart_case_volume(drug_glp1_ps: pd.DataFrame) -> str:
         fig.update_layout(
             title="GLP-1 primary-suspect cases per quarter by drug",
             height=380, margin=dict(l=60, r=20, t=40, b=100),
-            xaxis=dict(tickangle=45, tickfont=dict(size=9)),
+            xaxis=dict(tickangle=45, tickfont=dict(size=9),
+                       categoryorder="array",
+                       categoryarray=sorted(vol["_quarter"].unique(),
+                                           key=lambda x: x.replace("Q","-Q"))),
             paper_bgcolor="white", plot_bgcolor="white",
         )
         fig.update_yaxes(title="Unique cases", tickformat=",")
@@ -490,13 +497,13 @@ def build_report(
         print("ERROR: plotly required. Install: pip install plotly")
         return
 
-    def _load(pattern: str) -> pd.DataFrame:
+    def _load(pattern: str, columns: list = None) -> pd.DataFrame:
         """Load the most recent Parquet matching pattern."""
         files = sorted(processed_dir.glob(pattern))
         if not files:
             logger.warning(f"  No file matching {pattern}")
             return pd.DataFrame()
-        return pd.read_parquet(files[-1])
+        return pd.read_parquet(files[-1], columns=columns)
 
     def _load_csv(pattern: str) -> pd.DataFrame:
         files = sorted((logs_dir).glob(pattern))
@@ -508,7 +515,8 @@ def build_report(
         return pd.read_csv(files[-1])
 
     logger.info("  Loading processed files...")
-    demo_all     = _load("DEMO_deduplicated*.parquet")
+    demo_all     = _load("DEMO_deduplicated*.parquet",
+                         columns=["primaryid", "_quarter"])
     demo_glp1    = _load("DEMO_glp1*.parquet")
     drug_glp1_ps = _load("DRUG_glp1_ps*.parquet")
     signals_pt   = _load("signals_pt*.parquet")
