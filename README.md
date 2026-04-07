@@ -9,7 +9,7 @@
 
 ## Why this exists
 
-In 2024, GLP-1 receptor agonists became the fastest-adopted prescription 
+In 2024, GLP-1 receptor agonists became the fastest-adopted prescription
 drug class in US history. Ozempic, Wegovy, and Mounjaro prescriptions grew 
 300% year-over-year. At the same time, FDA staff reductions cut the 
 pharmacovigilance workforce responsible for monitoring adverse event signals 
@@ -24,6 +24,11 @@ wave of reports the standard pipeline wasn't designed to distinguish.
 I built this pipeline to do what that reduced workforce no longer could at 
 scale: ingest 20 years of raw FDA adverse event data, resolve its known 
 quality problems, and surface the signals that matter.
+
+---
+
+## Proposal
+**[📄 Project Proposal](docs/workspaces/GLP1-Sentinel/docs/FAERS_GLP1_Project_Proposal.pdf)** · 
 
 ---
 
@@ -197,6 +202,16 @@ reaction counts not demographics.
 ```bash
 python -m pytest tests/ -v
 ```
+
+---
+
+## 📊 Interactive EDA Report
+
+**[→ View the interactive report here](https://htmlpreview.github.io/?https://github.com/EstherKim97/GLP1-Sentinel/blob/main/docs/eda_report.html)**
+
+No installation required — opens in any browser.
+Includes signal detection results, SOC distribution, 
+case volume over time, and missingness analysis.
 
 ---
 
