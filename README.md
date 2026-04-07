@@ -28,7 +28,7 @@ quality problems, and surface the signals that matter.
 ---
 
 ## Proposal
-**[📄 Project Proposal](docs/workspaces/GLP1-Sentinel/docs/FAERS_GLP1_Project_Proposal.pdf)** · 
+**[📄 Project Proposal](docs/FAERS_GLP1_Project_Proposal.pdf)** · 
 
 ---
 
